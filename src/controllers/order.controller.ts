@@ -24,17 +24,20 @@ export const createOrder = async (req: any, res: Response) => {
             throw new Error('Cart is empty');
         }
 
-        // 2. Calculate total and check stock
-        let totalAmount = 0;
+        // 2. Calculate subtotal and check stock
+        let subtotal = 0;
         for (const item of itemsResult.rows) {
             if (item.stock < item.quantity) {
                 throw new Error(`Insufficient stock for product ID ${item.product_id}`);
             }
-            totalAmount += item.price * item.quantity;
+            subtotal += item.price * item.quantity;
         }
 
-        // 2.5 Apply Coupon
-        let discount = 0;
+        // 2.5 Calculate shipping
+        const shipping_amount = subtotal >= 500 ? 0 : 49;
+
+        // 2.6 Apply Coupon
+        let discount_amount = 0;
         if (coupon_id) {
             const couponResult = await client.query(
                 'SELECT * FROM coupons WHERE id = $1 AND is_active = true AND (valid_till IS NULL OR valid_till > CURRENT_TIMESTAMP) AND (valid_from IS NULL OR valid_from < CURRENT_TIMESTAMP)',
@@ -45,17 +48,15 @@ export const createOrder = async (req: any, res: Response) => {
                 const coupon = couponResult.rows[0];
 
                 // Check min order amount
-                if (!coupon.min_order_amount || totalAmount >= coupon.min_order_amount) {
+                if (!coupon.min_order_amount || subtotal >= coupon.min_order_amount) {
                     // Check usage limit
                     if (coupon.used_count < coupon.max_uses) {
-                        discount = (totalAmount * coupon.discount_percentage) / 100;
+                        discount_amount = (subtotal * coupon.discount_percentage) / 100;
 
                         // Apply max discount limit
-                        if (coupon.max_discount_amount && discount > coupon.max_discount_amount) {
-                            discount = coupon.max_discount_amount;
+                        if (coupon.max_discount_amount && discount_amount > coupon.max_discount_amount) {
+                            discount_amount = coupon.max_discount_amount;
                         }
-
-                        totalAmount -= discount;
 
                         // Update coupon usage
                         await client.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [coupon_id]);
@@ -64,6 +65,9 @@ export const createOrder = async (req: any, res: Response) => {
             }
         }
 
+        // 2.7 Calculate total
+        const total_amount = subtotal - discount_amount + shipping_amount;
+
         // 3. Get address snapshot
         const addressResult = await client.query('SELECT * FROM addresses WHERE id = $1 AND user_id = $2', [address_id, req.user.id]);
         if (addressResult.rows.length === 0) {
@@ -71,19 +75,21 @@ export const createOrder = async (req: any, res: Response) => {
         }
         const addressSnapshot = addressResult.rows[0];
 
-        // 4. Create order
+        // 4. Create order with detailed pricing
         const orderResult = await client.query(
-            `INSERT INTO orders (user_id, address_id, address_snapshot, total_amount, coupon_id) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [req.user.id, address_id, JSON.stringify(addressSnapshot), totalAmount, coupon_id]
+            `INSERT INTO orders (user_id, address_id, address_snapshot, subtotal, discount_amount, shipping_amount, total_amount, coupon_id, payment_status, fulfillment_status) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'pending') RETURNING *`,
+            [req.user.id, address_id, JSON.stringify(addressSnapshot), subtotal, discount_amount, shipping_amount, total_amount, coupon_id]
         );
         const order = orderResult.rows[0];
 
-        // 5. Create order items and update stock
+        // 5. Create order items with item_total and update stock
         for (const item of itemsResult.rows) {
+            const item_total = item.price * item.quantity;
+
             await client.query(
-                'INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase) VALUES ($1, $2, $3, $4)',
-                [order.id, item.product_id, item.quantity, item.price]
+                'INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase, item_total) VALUES ($1, $2, $3, $4, $5)',
+                [order.id, item.product_id, item.quantity, item.price, item_total]
             );
 
             const updateResult = await client.query(
@@ -148,6 +154,29 @@ export const getOrderDetails = async (req: any, res: Response) => {
         order.payment = paymentResult.rows[0] || null;
 
         res.json(order);
+    } catch (error: any) {
+        res.status(500).json({ message: error.message });
+    }
+};
+export const updateOrderStatus = async (req: any, res: Response) => {
+    try {
+        const { id } = req.params;
+        const { payment_status, fulfillment_status } = req.body;
+
+        const result = await pool.query(
+            `UPDATE orders 
+             SET payment_status = COALESCE($1, payment_status), 
+                 fulfillment_status = COALESCE($2, fulfillment_status),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $3 RETURNING *`,
+            [payment_status, fulfillment_status, id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        res.json(result.rows[0]);
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }

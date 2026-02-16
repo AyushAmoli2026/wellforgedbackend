@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { createOrder, getOrders, getOrderDetails } from '../controllers/order.controller.js';
+import { createOrder, getOrders, getOrderDetails, updateOrderStatus } from '../controllers/order.controller.js';
 import { processPayment, getPaymentStatus } from '../controllers/payment.controller.js';
-import { authenticate } from '../middlewares/auth.middleware.js';
+import { authenticate, authorize } from '../middlewares/auth.middleware.js';
 
 const router = Router();
 
@@ -9,6 +9,7 @@ const router = Router();
 router.post('/', authenticate, createOrder);
 router.get('/', authenticate, getOrders);
 router.get('/:id', authenticate, getOrderDetails);
+router.patch('/:id/status', authenticate, authorize(['admin']), updateOrderStatus);
 
 // Payment routes
 router.post('/payment', authenticate, processPayment);
