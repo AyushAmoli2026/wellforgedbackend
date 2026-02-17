@@ -8,20 +8,38 @@ export const createOrder = async (req: any, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // 1. Get cart items
+        // 1. Get cart items - LOCK product rows for the duration of this transaction
         const cartResult = await client.query('SELECT id FROM cart WHERE user_id = $1', [req.user.id]);
         if (cartResult.rows.length === 0) {
             throw new Error('Cart not found');
         }
         const cart_id = cartResult.rows[0].id;
 
+        // Use FOR UPDATE to lock product rows to prevent concurrent stock depletion
         const itemsResult = await client.query(
-            'SELECT ci.*, p.price, p.stock FROM cart_items ci JOIN products p ON ci.product_id = p.id WHERE ci.cart_id = $1',
+            `SELECT ci.*, p.price, p.stock 
+             FROM cart_items ci 
+             JOIN products p ON ci.product_id = p.id 
+             WHERE ci.cart_id = $1 
+             FOR UPDATE OF p`,
             [cart_id]
         );
 
         if (itemsResult.rows.length === 0) {
             throw new Error('Cart is empty');
+        }
+
+        // 1.5 CHECK IDEMPOTENCY (If key provided)
+        const { idempotency_key } = req.body;
+        if (idempotency_key) {
+            const existingOrder = await client.query(
+                'SELECT * FROM orders WHERE user_id = $1 AND idempotency_key = $2',
+                [req.user.id, idempotency_key]
+            );
+            if (existingOrder.rows.length > 0) {
+                await client.query('COMMIT');
+                return res.json(existingOrder.rows[0]);
+            }
         }
 
         // 2. Calculate subtotal and check stock
@@ -40,7 +58,7 @@ export const createOrder = async (req: any, res: Response) => {
         let discount_amount = 0;
         if (coupon_id) {
             const couponResult = await client.query(
-                'SELECT * FROM coupons WHERE id = $1 AND is_active = true AND (valid_till IS NULL OR valid_till > CURRENT_TIMESTAMP) AND (valid_from IS NULL OR valid_from < CURRENT_TIMESTAMP)',
+                'SELECT * FROM coupons WHERE id = $1 AND is_active = true AND (valid_till IS NULL OR valid_till > CURRENT_TIMESTAMP) AND (valid_from IS NULL OR valid_from < CURRENT_TIMESTAMP) FOR UPDATE',
                 [coupon_id]
             );
 
@@ -75,11 +93,11 @@ export const createOrder = async (req: any, res: Response) => {
         }
         const addressSnapshot = addressResult.rows[0];
 
-        // 4. Create order with detailed pricing
+        // 4. Create order with detailed pricing and idempotency key
         const orderResult = await client.query(
-            `INSERT INTO orders (user_id, address_id, address_snapshot, subtotal, discount_amount, shipping_amount, total_amount, coupon_id, payment_status, fulfillment_status) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'pending') RETURNING *`,
-            [req.user.id, address_id, JSON.stringify(addressSnapshot), subtotal, discount_amount, shipping_amount, total_amount, coupon_id]
+            `INSERT INTO orders (user_id, address_id, address_snapshot, subtotal, discount_amount, shipping_amount, total_amount, coupon_id, payment_status, fulfillment_status, idempotency_key) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'pending', $9) RETURNING *`,
+            [req.user.id, address_id, JSON.stringify(addressSnapshot), subtotal, discount_amount, shipping_amount, total_amount, coupon_id, idempotency_key]
         );
         const order = orderResult.rows[0];
 
@@ -93,13 +111,9 @@ export const createOrder = async (req: any, res: Response) => {
             );
 
             const updateResult = await client.query(
-                'UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING stock',
+                'UPDATE products SET stock = stock - $1 WHERE id = $2 RETURNING stock',
                 [item.quantity, item.product_id]
             );
-
-            if (updateResult.rows.length === 0) {
-                throw new Error(`Insufficient stock for product ID ${item.product_id} (Race condition)`);
-            }
 
             // Log inventory change
             await client.query(

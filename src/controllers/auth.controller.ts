@@ -28,10 +28,14 @@ export const signup = async (req: Request, res: Response) => {
 
         const user = newUser.rows[0];
 
-        // 4. Generate token
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+            throw new Error('JWT_SECRET is not defined');
+        }
+
         const token = jwt.sign(
             { id: user.id, role: user.role },
-            (process.env.JWT_SECRET as string) || 'secret',
+            jwtSecret,
             { expiresIn: (process.env.JWT_EXPIRES_IN as any) || '7d' }
         );
 
@@ -58,10 +62,14 @@ export const login = async (req: Request, res: Response) => {
 
         const user = userResult.rows[0];
 
-        // 3. Generate token
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+            throw new Error('JWT_SECRET is not defined');
+        }
+
         const token = jwt.sign(
             { id: user.id, role: user.role },
-            (process.env.JWT_SECRET as string) || 'secret',
+            jwtSecret,
             { expiresIn: (process.env.JWT_EXPIRES_IN as any) || '7d' }
         );
 
