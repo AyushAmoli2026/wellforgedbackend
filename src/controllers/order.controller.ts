@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import pool from '../config/db.js';
+import MailerService from '../services/mailer.service.js';
 
 export const createOrder = async (req: any, res: Response) => {
     const { address_id, coupon_id } = req.body;
@@ -7,6 +8,10 @@ export const createOrder = async (req: any, res: Response) => {
 
     try {
         await client.query('BEGIN');
+
+        // 0. Fetch user email for notification
+        const userResult = await client.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+        const userEmail = userResult.rows[0]?.email;
 
         // 1. Get cart items - LOCK product rows for the duration of this transaction
         const cartResult = await client.query('SELECT id FROM cart WHERE user_id = $1', [req.user.id]);
@@ -126,6 +131,14 @@ export const createOrder = async (req: any, res: Response) => {
         await client.query('DELETE FROM cart_items WHERE cart_id = $1', [cart_id]);
 
         await client.query('COMMIT');
+
+        // 7. Send notification (async)
+        if (userEmail) {
+            MailerService.sendOrderConfirmation(userEmail, order.id, total_amount).catch(err =>
+                console.error('Failed to send order confirmation email:', err)
+            );
+        }
+
         res.status(201).json(order);
     } catch (error: any) {
         await client.query('ROLLBACK');
@@ -190,7 +203,24 @@ export const updateOrderStatus = async (req: any, res: Response) => {
             return res.status(404).json({ message: 'Order not found' });
         }
 
-        res.json(result.rows[0]);
+        const updatedOrder = result.rows[0];
+
+        // Send status update email if fulfillment status changed
+        if (fulfillment_status) {
+            try {
+                const userRes = await pool.query(
+                    'SELECT u.email FROM users u JOIN orders o ON u.id = o.user_id WHERE o.id = $1',
+                    [id]
+                );
+                if (userRes.rows[0]?.email) {
+                    MailerService.sendShippingUpdate(userRes.rows[0].email, id, fulfillment_status);
+                }
+            } catch (err) {
+                console.error('Email notification error:', err);
+            }
+        }
+
+        res.json(updatedOrder);
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }
