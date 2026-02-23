@@ -8,28 +8,28 @@ export const getBatchReport = async (req: any, res: Response) => {
         let batchResult;
         if (product_id) {
             batchResult = await pool.query(
-                'SELECT rb.*, p.name as "productName" FROM report_batches rb JOIN products p ON rb.product_id = p.id WHERE rb.product_id = $1 AND rb.batch_number = $2',
+                'SELECT b.*, p.name as "productName" FROM batches b JOIN products p ON b.product_id = p.id WHERE b.product_id = $1 AND b.batch_number = $2',
                 [product_id, batch_number]
             );
         } else {
             batchResult = await pool.query(
-                'SELECT rb.*, p.name as "productName" FROM report_batches rb JOIN products p ON rb.product_id = p.id WHERE rb.batch_number = $1',
+                'SELECT b.*, p.name as "productName" FROM batches b JOIN products p ON b.product_id = p.id WHERE b.batch_number = $1',
                 [batch_number]
             );
         }
 
         if (batchResult.rows.length === 0) {
-            // Log failed check
+            // Log failed check (using report_access_logs)
             await pool.query(
-                'INSERT INTO report_check_logs (product_id, batch_number, fetch_status, ip_address, user_id) VALUES ($1, $2, $3, $4, $5)',
-                [product_id || null, batch_number, 'not_found', req.ip, req.user?.id || null]
+                'INSERT INTO report_access_logs (batch_number, ip_address, profile_id) VALUES ($1, $2, $3)',
+                [batch_number, req.ip, req.user?.id || null]
             );
             return res.status(404).json({ message: 'Batch report not found' });
         }
 
         const batch = batchResult.rows[0];
         const resultsResult = await pool.query(
-            'SELECT test_name as name, test_value as result, unit as limit, pass_status as status FROM report_test_results WHERE batch_id = $1 ORDER BY created_at ASC',
+            'SELECT parameter as name, value as result, limit_val as limit, status FROM batch_test_results WHERE batch_id = $1 ORDER BY created_at ASC',
             [batch.id]
         );
 
@@ -41,15 +41,15 @@ export const getBatchReport = async (req: any, res: Response) => {
 
         // Log successful check
         await pool.query(
-            'INSERT INTO report_check_logs (product_id, batch_number, fetch_status, ip_address, user_id) VALUES ($1, $2, $3, $4, $5)',
-            [batch.product_id, batch_number, 'success', req.ip, req.user?.id || null]
+            'INSERT INTO report_access_logs (batch_number, ip_address, profile_id) VALUES ($1, $2, $3)',
+            [batch_number, req.ip, req.user?.id || null]
         );
 
         res.json({
             batchNumber: batch.batch_number,
             productName: batch.productName,
-            testDate: batch.testing_date,
-            labName: batch.tested_by,
+            testDate: batch.mfg_date, // Using mfg_date as test date fallback
+            labName: 'WellForged Internal Lab', // Default or fetch from product metadata
             status: tests.every(t => t.status === 'passed') ? 'passed' : 'failed',
             tests: tests
         });
@@ -59,12 +59,12 @@ export const getBatchReport = async (req: any, res: Response) => {
 };
 
 export const getInventoryLogs = async (req: Request, res: Response) => {
-    const { product_id } = req.params;
+    const { sku_id } = req.params;
 
     try {
         const result = await pool.query(
-            'SELECT * FROM inventory_logs WHERE product_id = $1 ORDER BY created_at DESC',
-            [product_id]
+            'SELECT * FROM inventory_logs WHERE sku_id = $1 ORDER BY created_at DESC',
+            [sku_id]
         );
         res.json(result.rows);
     } catch (error: any) {
@@ -73,7 +73,7 @@ export const getInventoryLogs = async (req: Request, res: Response) => {
 };
 
 export const createBatchReport = async (req: Request, res: Response) => {
-    const { product_id, batch_number, testing_date, tested_by, test_results } = req.body;
+    const { product_id, batch_number, mfg_date, exp_date, test_results } = req.body;
 
     if (!Array.isArray(test_results)) {
         return res.status(400).json({ message: 'test_results must be an array' });
@@ -85,15 +85,15 @@ export const createBatchReport = async (req: Request, res: Response) => {
         await client.query('BEGIN');
 
         const batchResult = await client.query(
-            'INSERT INTO report_batches (product_id, batch_number, testing_date, tested_by) VALUES ($1, $2, $3, $4) RETURNING *',
-            [product_id, batch_number, testing_date, tested_by]
+            'INSERT INTO batches (product_id, batch_number, mfg_date, exp_date) VALUES ($1, $2, $3, $4) RETURNING *',
+            [product_id, batch_number, mfg_date, exp_date]
         );
         const batch = batchResult.rows[0];
 
         for (const test of test_results) {
             await client.query(
-                'INSERT INTO report_test_results (batch_id, test_name, test_value, unit, pass_status) VALUES ($1, $2, $3, $4, $5)',
-                [batch.id, test.test_name, test.test_value, test.unit, test.pass_status]
+                'INSERT INTO batch_test_results (batch_id, parameter, value, limit_val, status) VALUES ($1, $2, $3, $4, $5)',
+                [batch.id, test.parameter, test.value, test.limit_val, test.status]
             );
         }
 

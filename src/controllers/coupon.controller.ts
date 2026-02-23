@@ -25,10 +25,10 @@ export const validateCoupon = async (req: Request, res: Response) => {
         const coupon = couponResult.rows[0];
 
         // Check minimum order amount
-        if (coupon.min_order_amount && subtotal < coupon.min_order_amount) {
+        if (coupon.min_order_value && subtotal < coupon.min_order_value) {
             return res.status(400).json({
                 valid: false,
-                message: `Minimum order amount of ₹${coupon.min_order_amount} required`
+                message: `Minimum order amount of ₹${coupon.min_order_value} required`
             });
         }
 

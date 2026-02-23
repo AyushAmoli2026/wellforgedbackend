@@ -4,7 +4,7 @@ export const signupSchema = z.object({
     body: z.object({
         first_name: z.string().min(1, 'First name is required'),
         last_name: z.string().min(1, 'Last name is required'),
-        email: z.string().email('Invalid email address'),
+        email: z.string().email('Invalid email address').optional(),
         mobile_number: z.string().regex(/^[0-9]{10}$/, 'Mobile number must be 10 digits'),
         otp: z.string().min(4, 'OTP must be at least 4 digits'),
         terms_accepted: z.boolean().refine(val => val === true, 'You must accept the terms and conditions'),

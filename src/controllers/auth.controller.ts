@@ -7,39 +7,37 @@ export const signup = async (req: Request, res: Response) => {
     const { first_name, last_name, email, mobile_number, otp, terms_accepted, whatsapp_opt_in } = req.body;
 
     try {
-        // 1. Verify OTP (default 1234)
+        // Default OTP for development: 1234
         if (otp !== '1234') {
             return res.status(400).json({ message: 'Invalid OTP' });
         }
 
-        // 2. Check if user exists by mobile_number
-        const userExists = await pool.query('SELECT * FROM users WHERE mobile_number = $1', [mobile_number]);
+        const userExists = await pool.query('SELECT * FROM profiles WHERE phone = $1', [mobile_number]);
         if (userExists.rows.length > 0) {
             return res.status(400).json({ message: 'User already exists, please login' });
         }
 
-        // 3. Create user (password is not used in OTP flow but kept in DB if needed, using a random one)
-        const password = await bcrypt.hash(Math.random().toString(36), 10);
+        // Generate a random UUID for the profile (since we aren't using auth.users yet via Supabase Auth JS)
+        const id = crypto.randomUUID();
+        const full_name = `${first_name} ${last_name}`.trim();
 
         const newUser = await pool.query(
-            'INSERT INTO users (first_name, last_name, email, mobile_number, password, terms_accepted, whatsapp_opt_in) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, first_name, last_name, email, mobile_number, role',
-            [first_name, last_name, email, mobile_number, password, terms_accepted || false, whatsapp_opt_in || false]
+            'INSERT INTO profiles (id, full_name, phone) VALUES ($1, $2, $3) RETURNING id, full_name, phone',
+            [id, full_name, mobile_number]
         );
 
         const user = newUser.rows[0];
 
         const jwtSecret = process.env.JWT_SECRET;
-        if (!jwtSecret) {
-            throw new Error('JWT_SECRET is not defined');
-        }
+        if (!jwtSecret) throw new Error('JWT_SECRET is not defined');
 
         const token = jwt.sign(
-            { id: user.id, role: user.role },
+            { id: user.id, role: 'customer' },
             jwtSecret,
             { expiresIn: (process.env.JWT_EXPIRES_IN as any) || '7d' }
         );
 
-        res.status(201).json({ token, user });
+        res.status(201).json({ token, user: { ...user, first_name, last_name, mobile_number: user.phone, role: 'customer' } });
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }
@@ -49,26 +47,24 @@ export const login = async (req: Request, res: Response) => {
     const { mobile_number, otp } = req.body;
 
     try {
-        // 1. Verify OTP
         if (otp !== '1234') {
             return res.status(400).json({ message: 'Invalid OTP' });
         }
 
-        // 2. Find user
-        const userResult = await pool.query('SELECT * FROM users WHERE mobile_number = $1', [mobile_number]);
+        const userResult = await pool.query('SELECT * FROM profiles WHERE phone = $1', [mobile_number]);
         if (userResult.rows.length === 0) {
             return res.status(404).json({ message: 'User not found, please signup' });
         }
 
         const user = userResult.rows[0];
+        const [first_name, ...last_parts] = (user.full_name || '').split(' ');
+        const last_name = last_parts.join(' ');
 
         const jwtSecret = process.env.JWT_SECRET;
-        if (!jwtSecret) {
-            throw new Error('JWT_SECRET is not defined');
-        }
+        if (!jwtSecret) throw new Error('JWT_SECRET is not defined');
 
         const token = jwt.sign(
-            { id: user.id, role: user.role },
+            { id: user.id, role: user.role || 'customer' },
             jwtSecret,
             { expiresIn: (process.env.JWT_EXPIRES_IN as any) || '7d' }
         );
@@ -77,13 +73,36 @@ export const login = async (req: Request, res: Response) => {
             token,
             user: {
                 id: user.id,
-                first_name: user.first_name,
-                last_name: user.last_name,
-                email: user.email,
-                mobile_number: user.mobile_number,
-                role: user.role,
+                first_name,
+                last_name,
+                email: user.email || '',
+                mobile_number: user.phone,
+                role: user.role || 'customer',
             },
         });
+    } catch (error: any) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+export const checkPhone = async (req: Request, res: Response) => {
+    const { mobile_number } = req.body;
+
+    if (!mobile_number || String(mobile_number).length !== 10) {
+        return res.status(400).json({ message: 'Invalid mobile number' });
+    }
+
+    try {
+        const result = await pool.query(
+            'SELECT id FROM profiles WHERE phone = $1',
+            [mobile_number]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'No account found with this number. Please sign up first.' });
+        }
+
+        return res.status(200).json({ exists: true });
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }
@@ -92,7 +111,7 @@ export const login = async (req: Request, res: Response) => {
 export const getProfile = async (req: any, res: Response) => {
     try {
         const userResult = await pool.query(
-            'SELECT id, first_name, last_name, email, mobile_number, role, is_verified, created_at FROM users WHERE id = $1',
+            'SELECT id, full_name, phone, loyalty_points, created_at FROM profiles WHERE id = $1',
             [req.user.id]
         );
 
@@ -100,7 +119,16 @@ export const getProfile = async (req: any, res: Response) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        res.json(userResult.rows[0]);
+        const user = userResult.rows[0];
+        const [first_name, ...last_parts] = (user.full_name || '').split(' ');
+        const last_name = last_parts.join(' ');
+
+        res.json({
+            ...user,
+            first_name,
+            last_name,
+            mobile_number: user.phone
+        });
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }
