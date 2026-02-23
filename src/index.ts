@@ -42,8 +42,8 @@ const authLimiter = rateLimit({
 app.use(helmet());
 app.use(limiter);
 app.use(cors({
-    origin: process.env.ALLOWED_ORIGIN || 'http://localhost:5173',
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    origin: process.env.ALLOWED_ORIGIN || '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true
 }));
 app.use(express.json());
